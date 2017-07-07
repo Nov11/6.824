@@ -57,6 +57,9 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 					ret := call(w, "Worker.DoTask", &doTaskArgs, nil)
 					if ret {
 						wg.Done()
+					}else{
+						num <- taskNum
+						return
 					}
 				}
 
