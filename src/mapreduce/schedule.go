@@ -35,25 +35,33 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
-	taskIdx := 0
+	//taskIdx := 0
 	wg := sync.WaitGroup{}
 	wg.Add(ntasks)
+	num := make(chan int)
+
 	go func() {
-		for workerAddr := range registerChan {
-			if taskIdx >= ntasks {
-				continue
-			}
-
-			doTaskArgs := DoTaskArgs{JobName: jobName, Phase: phase, TaskNumber: taskIdx, NumOtherPhase: n_other, File: mapFiles[taskIdx]}
-			taskIdx++
-
-			go func(w string) {
-				call(w, "Worker.DoTask", &doTaskArgs, nil)
-				registerChan <- w
-				wg.Done()
-			}(workerAddr)
+		for i := 0; i < ntasks; i++ {
+			num <- i
 		}
+	}()
+	go func() {
+		for worker := range registerChan {
+			go func(w string) {
+				for true {
+					taskNum, ok := <-num
+					if !ok {
+						return
+					}
+					doTaskArgs := DoTaskArgs{JobName: jobName, Phase: phase, TaskNumber: taskNum, NumOtherPhase: n_other, File: mapFiles[taskNum]}
+					ret := call(w, "Worker.DoTask", &doTaskArgs, nil)
+					if ret {
+						wg.Done()
+					}
+				}
 
+			}(worker)
+		}
 	}()
 	wg.Wait()
 
