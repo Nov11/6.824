@@ -319,18 +319,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 //yes, I'm using time out here.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+func (rf *Raft) sendRequestVoteWithTimeOut(server int, args *RequestVoteArgs, reply *RequestVoteReply, timeOut int) bool {
 	c := make(chan bool, 1)
-	go func() {
-		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-		c <- ok
-	}()
+	go func(rf *Raft) {
+		c <- rf.sendRequestVote(server, args, reply)
+	}(rf)
 
 	var ret bool
 	select {
 	case ret = <-c:
-	case <- time.After(time.Millisecond * 100):
+	case <- time.After(time.Millisecond * time.Duration(timeOut)):
 	}
-	//ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+
 	return ret
 }
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -417,7 +420,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	go func(rf *Raft) {
-	OutMostFor:
 		for true {
 			rf.mu.Lock()
 			//if rf.role == 2 {
@@ -462,34 +464,60 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.delay = rf.generateDelay()
 			cacheMe := rf.me
 			cacheTerm := rf.currentTerm
+			timeOut := rf.delay
 			rf.mu.Unlock()
 
-			req := &RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
+			req := &RequestVoteArgs{Term: cacheTerm, CandidateId: cacheMe}
 			//send req
-			cnt := 1
+			majority := len(rf.peers) / 2
 			start := time.Now()
 			DPrintf("rf.me:%v<rf.term:%v> request for election:", rf.me, rf.currentTerm)
+
+			voteChan := make(chan int)
 			for i := 0; i < len(rf.peers); i++ {
 				if i == cacheMe {
 					continue
 				}
-				rsp := &RequestVoteReply{}
-				ret := rf.sendRequestVote(i, req, rsp)
-				if ret && rsp.VoteGranted {
-					cnt++
-				}
-				if ret && rsp.Term > cacheTerm {
-					rf.mu.Lock()
-					rf.switchToFollower(rsp.Term)
-					rf.mu.Unlock()
-					DPrintf("rf.me:%v request for election: req:%v continue OutMost", rf.me, i)
-					continue OutMostFor
-				}
-				DPrintf("rf.me:%v request for election: req:%v ret:%v rsp:%v", rf.me, i, ret, rsp)
-				if cnt > len(rf.peers)/2 {
+
+				go func(i int, req RequestVoteArgs, rf*Raft) {
+					rsp := &RequestVoteReply{}
+					ret := rf.sendRequestVoteWithTimeOut(i, &req, rsp, 50)
+					DPrintf("rf.me:%v request for election: req:%v ret:%v rsp:%v", rf.me, i, ret, rsp)
+					//var valid bool
+					//select {
+					//case _, r := <-voteChan:
+					//	valid = r
+					//default:
+					//	valid = false
+					//}
+					//if !valid{return}
+
+					if ret && rsp.VoteGranted {
+						voteChan <- 1
+						return
+					}
+					if ret && rsp.Term > req.Term {
+						rf.mu.Lock()
+						rf.switchToFollower(rsp.Term)
+						rf.mu.Unlock()
+						DPrintf("rf.me:%v request for election: req:%v Switch Role to follower", rf.me, i)
+						return
+					}
+				}(i, *req, rf)
+			}
+
+			//loop until the rf win this election or time out
+			cnt := 1
+			for cnt <= majority{
+				select {
+				case in := <-voteChan:
+					cnt = cnt + in
+				case <-time.After(timeOut.Sub(time.Now())):
 					break
 				}
 			}
+			close(voteChan)
+
 			elapse := time.Since(start)
 			beLeader := false
 			timeCost := int(elapse.Nanoseconds() / int64(1000*1000))
@@ -497,7 +525,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			//rf.delay -= timeCost
 
 			DPrintf("rf.me:%v request for election: return cnt:%v timeCost:%v", rf.me, cnt, timeCost)
-			if cnt > len(rf.peers)/2 && cacheTerm == rf.currentTerm {
+			if cnt > majority && cacheTerm == rf.currentTerm {
 				DPrintf("!!!!rf.me:%v become leader, curTerm:%v", rf.me, rf.currentTerm)
 				rf.role = 2
 				beLeader = true
