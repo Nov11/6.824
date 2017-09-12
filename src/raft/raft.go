@@ -51,7 +51,8 @@ type Raft struct {
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	// state a Raft server must maintain
+	//should be used through accessor
 	currentTerm int
 	votedFor    int //use -1 for nil
 	log         []Entry
@@ -161,6 +162,8 @@ func (ap *AppendEntriesReply) String() string { return fmt.Sprintf("AppendEntrie
 //
 // example RequestVote RPC handler.
 //
+// raft may be in 3 state
+// and
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
@@ -169,41 +172,119 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	defer DPrintf("RequestVote ori rf : %v  rf : %v args : %v reply : %v\n", &ori, rf, args, reply)
 
-	if args.Term > rf.currentTerm {
-		rf.switchToFollower(args.Term)
-	}
-
-	reply.Term = rf.currentTerm
+	//take care of stale request which term < current term
 	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
-	//todo : check log is up to date
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+
+	//rf is in old term, so turns to follower and take args.CandidateId as new leader
+	if args.Term > rf.currentTerm {
+		rf.switchToFollower(args.Term)
 		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
-	} else {
-		reply.VoteGranted = false
+		rf.delay = rf.generateDelay()
+
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = true//rf vote the candidate in newer term
+		return
 	}
+
+	//----rf is in the same term as args.term
+	//three possible states, right?
+	if rf.role == 2{
+		//I'm already the leader of this term.
+		//the role may be changed only receiving RPC of larger term
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+
+		return
+	}
+	//as long as follower gets RPC from leader (append entry) or candidate(request vote)
+	//it stays in follower state
+	//I think the RPC that make sense here should be in curTerm
+	//as the paper listed what should be done when encounter newer or older term in request
+	//so the delay should be reset
+	if rf.role == 0 {
+		//reset time out delay
+		rf.delay = rf.generateDelay()
+
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		//todo : check log is up to date
+		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+			rf.votedFor = args.CandidateId
+			reply.VoteGranted = true
+		}
+		return
+	}
+
+
+	//role == 1
+	//there is no way that I receive a request from myself of the same term
+	//so reject any request vote request
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+	return
 }
 
+//todo: append logs in 2B
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	ori := *rf
 
 	defer rf.mu.Unlock()
 	defer DPrintf("AppendEntries ori rf : %v  rf : %v args : %v reply : %v\n", &ori, rf, args, reply)
-	rf.delay = rf.generateDelay()
 
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
+	//todo: some checks on prevLogIndex etc
 	if args.Term > rf.currentTerm {
 		rf.switchToFollower(args.Term)
 		rf.votedFor = args.LeaderId
+		rf.delay = rf.generateDelay()
+
+		reply.Term = rf.currentTerm
+		reply.Success = true
+		return
 	}
 
-	//if term is eq do something add code in future
+	//as a leader, drop this
+	if rf.role == 2 {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		DPrintf("[ERROR] leader receive appendentry RPC of same term !!! term: %v ", rf.currentTerm)
+		return
+	}
 
-	reply.Success = !(args.Term < rf.currentTerm)
+	//if current raft is in candidate state and receive a AppendEntry RPC that has equal term
+	//it means that a leader has been elected
+	//so return to follower state and set leader to args.LeaderId
+	if rf.role == 1 {
+		rf.switchToFollower(args.Term)
+		rf.votedFor = args.LeaderId
+		rf.delay = rf.generateDelay()
+
+		reply.Term = rf.currentTerm
+		reply.Success = true
+		return
+	}
+
+	//same term, as follower
+	rf.delay = rf.generateDelay()//stay in follower state
+	//todo:add assert
+	if rf.votedFor != -1 && rf.votedFor != args.LeaderId{
+		DPrintf("[ERROR]follower of term: %v voted leader: %v but receive appRPC from %v", rf.currentTerm, rf.votedFor, args.LeaderId)
+	}
+	rf.votedFor = args.LeaderId
+
+	reply.Success = true
 	reply.Term = rf.currentTerm
+	return
 }
 
 //
@@ -374,7 +455,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			//send req
 			cnt := 1
 			start := time.Now()
-			DPrintf("rf.me:%v request for election:", rf.me)
+			DPrintf("rf.me:%v<rf.term:%v> request for election:", rf.me, rf.currentTerm)
 			for i := 0; i < len(rf.peers); i++ {
 				if i == cacheMe {
 					continue
