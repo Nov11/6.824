@@ -19,26 +19,26 @@ import "sync"
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
-//func TestInitialElection2A(t *testing.T) {
-//	servers := 3
-//	cfg := make_config(t, servers, false)
-//	defer cfg.cleanup()
-//
-//	fmt.Printf("Test (2A): initial election ...\n")
-//
-//	// is a leader elected?
-//	cfg.checkOneLeader()
-//
-//	// does the leader+term stay the same if there is no network failure?
-//	term1 := cfg.checkTerms()
-//	time.Sleep(2 * RaftElectionTimeout)
-//	term2 := cfg.checkTerms()
-//	if term1 != term2 {
-//		fmt.Printf("warning: term changed even though there were no failures")
-//	}
-//
-//	fmt.Printf("  ... Passed\n")
-//}
+func TestInitialElection2A(t *testing.T) {
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2A): initial election ...\n")
+
+	// is a leader elected?
+	cfg.checkOneLeader()
+
+	// does the leader+term stay the same if there is no network failure?
+	term1 := cfg.checkTerms()
+	time.Sleep(2 * RaftElectionTimeout)
+	term2 := cfg.checkTerms()
+	if term1 != term2 {
+		fmt.Printf("warning: term changed even though there were no failures")
+	}
+
+	fmt.Printf("  ... Passed\n")
+}
 
 func TestReElection2A(t *testing.T) {
 	servers := 3

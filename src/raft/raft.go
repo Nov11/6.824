@@ -316,9 +316,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
+
+//yes, I'm using time out here.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+	c := make(chan bool, 1)
+	go func() {
+		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+		c <- ok
+	}()
+
+	var ret bool
+	select {
+	case ret = <-c:
+	case <- time.After(time.Millisecond * 100):
+	}
+	//ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ret
 }
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
