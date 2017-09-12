@@ -473,7 +473,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			start := time.Now()
 			DPrintf("rf.me:%v<rf.term:%v> request for election:", rf.me, rf.currentTerm)
 
-			voteChan := make(chan int)
+			voteChan := make(chan int, 100)//limit connected hosts to 100
 			for i := 0; i < len(rf.peers); i++ {
 				if i == cacheMe {
 					continue
@@ -482,15 +482,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				go func(i int, req RequestVoteArgs, rf*Raft) {
 					rsp := &RequestVoteReply{}
 					ret := rf.sendRequestVoteWithTimeOut(i, &req, rsp, 50)
-					DPrintf("rf.me:%v request for election: req:%v ret:%v rsp:%v", rf.me, i, ret, rsp)
-					//var valid bool
-					//select {
-					//case _, r := <-voteChan:
-					//	valid = r
-					//default:
-					//	valid = false
-					//}
-					//if !valid{return}
+					DPrintf("rf.me:%v request for election: req:%v ret:%v rsp:%v", cacheMe, i, ret, rsp)
 
 					if ret && rsp.VoteGranted {
 						voteChan <- 1
@@ -498,9 +490,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					}
 					if ret && rsp.Term > req.Term {
 						rf.mu.Lock()
-						rf.switchToFollower(rsp.Term)
+						if rsp.Term > rf.currentTerm{
+							rf.switchToFollower(rsp.Term)
+							DPrintf("rf.me:%v request for election: req:%v Switch Role to follower", rf.me, i)
+						}
 						rf.mu.Unlock()
-						DPrintf("rf.me:%v request for election: req:%v Switch Role to follower", rf.me, i)
+
 						return
 					}
 				}(i, *req, rf)
@@ -509,14 +504,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			//loop until the rf win this election or time out
 			cnt := 1
 			for cnt <= majority{
+				mills := timeOut.Sub(time.Now())
+				DPrintf("wake after : %v", mills)
+				if mills < 0{
+					break
+				}
 				select {
 				case in := <-voteChan:
 					cnt = cnt + in
-				case <-time.After(timeOut.Sub(time.Now())):
+				case <-time.After(mills):
 					break
 				}
 			}
-			close(voteChan)
 
 			elapse := time.Since(start)
 			beLeader := false
@@ -524,7 +523,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.mu.Lock()
 			//rf.delay -= timeCost
 
-			DPrintf("rf.me:%v request for election: return cnt:%v timeCost:%v", rf.me, cnt, timeCost)
+			DPrintf("[rf.me:%v request for election]: return cnt:%v timeCost:%v", rf.me, cnt, timeCost)
 			if cnt > majority && cacheTerm == rf.currentTerm {
 				DPrintf("!!!!rf.me:%v become leader, curTerm:%v", rf.me, rf.currentTerm)
 				rf.role = 2

@@ -1,0 +1,3 @@
+some limitations of this implementation:
+
+cluster size <= 100 (I used a fixed size channel array in concurrent rpc request sending)
