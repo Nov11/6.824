@@ -139,6 +139,7 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term         int
 	CandidateId  int
+	//these are talking about committed logs, see 5.4.1
 	LastLogIndex int
 	LastLogTerm  int
 }
