@@ -139,7 +139,7 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term         int
 	CandidateId  int
-	//these are talking about committed logs, see 5.4.1
+	//these are talking about committed logs, see 5.4.1. but not related to commitIndex.
 	LastLogIndex int
 	LastLogTerm  int
 }
@@ -222,8 +222,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.votedFor == -1{
 			//vote for this candidate if last entries of this raft is not later than the request
 			//and if the term is the same, candidate's log should not be smaller than the current raft
-			//or deny this requeset
-			if rf.log[rf.commitIndex].Term <= args.LastLogTerm && rf.commitIndex <= args.LastLogIndex {
+			//or deny this request
+			size := len(rf.log)
+			if size == 0 && args.LastLogTerm >= 1 && args.LastLogIndex >= 0{
+				rf.votedFor = args.CandidateId
+				reply.VoteGranted = true
+			}else if rf.log[size - 1].Term <= args.LastLogTerm && size <= args.LastLogIndex {
 				rf.votedFor = args.CandidateId
 				reply.VoteGranted = true
 				return
@@ -468,10 +472,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.delay = rf.generateDelay()
 			cacheMe := rf.me
 			cacheTerm := rf.currentTerm
+			cacheLastIndex := len(rf.log)
+			cacheLastTerm := 0
+			if cacheLastIndex != 0{
+				cacheLastTerm = rf.log[cacheLastIndex - 1].Term
+			}
 			timeOut := rf.delay
 			rf.mu.Unlock()
 
-			req := &RequestVoteArgs{Term: cacheTerm, CandidateId: cacheMe}
+			req := &RequestVoteArgs{Term: cacheTerm, CandidateId: cacheMe, LastLogTerm:cacheLastTerm, LastLogIndex:cacheLastIndex}
 			//send req
 			majority := len(rf.peers) / 2
 			start := time.Now()
