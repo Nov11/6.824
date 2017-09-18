@@ -63,13 +63,15 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	role  int //0:follower 1:candidate 2:leader
-	delay time.Time
+	role    int //0:follower 1:candidate 2:leader
+	delay   time.Time
+	cond    *sync.Cond //use this to issue append entry rpcs
+	applyCh chan ApplyMsg
 }
 
 type Entry struct {
 	Term    int
-	Command string
+	Command interface{}
 }
 
 type AppendEntriesArgs struct {
@@ -137,8 +139,8 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term         int
-	CandidateId  int
+	Term        int
+	CandidateId int
 	//these are talking about committed logs, see 5.4.1. but not related to commitIndex.
 	LastLogIndex int
 	LastLogTerm  int
@@ -187,13 +189,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.delay = rf.generateDelay()
 
 		reply.Term = rf.currentTerm
-		reply.VoteGranted = true//rf vote the candidate in newer term
+		reply.VoteGranted = true //rf vote the candidate in newer term
 		return
 	}
 
 	//----rf is in the same term as args.term
 	//three possible states, right?
-	if rf.role == 2{
+	if rf.role == 2 {
 		//I'm already the leader of this term.
 		//the role may be changed only receiving RPC of larger term
 		reply.Term = rf.currentTerm
@@ -219,15 +221,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			return
 		}
 
-		if rf.votedFor == -1{
+		if rf.votedFor == -1 {
 			//vote for this candidate if last entries of this raft is not later than the request
 			//and if the term is the same, candidate's log should not be smaller than the current raft
 			//or deny this request
 			size := len(rf.log)
-			if size == 0 && args.LastLogTerm >= 1 && args.LastLogIndex >= 0{
+			if size == 0 && args.LastLogTerm >= 1 && args.LastLogIndex >= 0 {
 				rf.votedFor = args.CandidateId
 				reply.VoteGranted = true
-			}else if rf.log[size - 1].Term <= args.LastLogTerm && size <= args.LastLogIndex {
+			} else if rf.log[size-1].Term <= args.LastLogTerm && size <= args.LastLogIndex {
 				rf.votedFor = args.CandidateId
 				reply.VoteGranted = true
 				return
@@ -237,7 +239,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		return
 	}
-
 
 	//role == 1
 	//there is no way that I receive a request from myself of the same term
@@ -294,9 +295,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	//same term, as follower
-	rf.delay = rf.generateDelay()//stay in follower state
+	rf.delay = rf.generateDelay() //stay in follower state
 	//todo:add assert
-	if rf.votedFor != -1 && rf.votedFor != args.LeaderId{
+	if rf.votedFor != -1 && rf.votedFor != args.LeaderId {
 		DPrintf("[ERROR]follower of term: %v voted leader: %v but receive appRPC from %v", rf.currentTerm, rf.votedFor, args.LeaderId)
 	}
 	rf.votedFor = args.LeaderId
@@ -350,7 +351,7 @@ func (rf *Raft) sendRequestVoteWithTimeOut(server int, args *RequestVoteArgs, re
 	var ret bool
 	select {
 	case ret = <-c:
-	case <- time.After(time.Millisecond * time.Duration(timeOut)):
+	case <-time.After(time.Millisecond * time.Duration(timeOut)):
 	}
 
 	return ret
@@ -379,8 +380,76 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	size := len(rf.log)
+	index = size + 1
+	term = rf.currentTerm
+	isLeader = rf.role == 2
+
+	if isLeader {
+		go rf.replicateLog(command)
+	}
 
 	return index, term, isLeader
+}
+
+func (rf *Raft) replicateLog(command interface{}) {
+	//1.append command to rf's own log
+	//2.issue append entry rpc
+	//3.if it's safe to apply this command, apply it to state machine
+	//4.return result to client
+	rf.mu.Lock()
+	cmd := Entry{Term: rf.currentTerm, Command: command}
+	rf.log = append(rf.log, cmd)
+	previousIndex := len(rf.log) - 1
+	previousTerm := 0
+	if previousIndex != 0 {
+		previousTerm = rf.log[previousIndex-1].Term
+	}
+	rf.mu.Unlock()
+	//issue rpc only if previous command is committed or this command will not be accepted by followers as
+	//they can't find log entry matching previous index and term
+
+	rf.mu.Lock()
+	for rf.commitIndex != previousIndex {
+		rf.cond.Wait()
+	}
+	request := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: previousIndex, PrevLogTerm: previousTerm, LeaderCommit: rf.commitIndex}
+	size := len(rf.peers)
+	rf.mu.Unlock()
+	accepted := make(chan int, 100)
+	for i := 0; i < len(rf.peers); i++ {
+		go rf.replicateThisLogRPC(request, &accepted)
+	}
+
+	cnt := 1
+	for cnt < size/2+1 {
+		select {
+		case <-accepted:
+			cnt = cnt + 1
+		}
+	}
+
+
+	msg := ApplyMsg{Index: request.PrevLogIndex + 1, Command:command}
+	rf.applyCh <- msg
+
+	//make sure this log entry is append to all followers
+	//this is not necessary as channel accepted is with buffer of large enough size
+	for cnt < size {
+		select {
+		case <-accepted:
+			cnt = cnt + 1
+		}
+	}
+}
+
+func (rf *Raft) replicateThisLogRPC(args AppendEntriesArgs, acc *chan int) {
+	//set entries to this args
+
+	//send rpc
+	//
 }
 
 //
@@ -433,8 +502,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	size := len(rf.log)
+	rf.nextIndex = make([]int, len(rf.peers))
+	nextIndexInit := 0
+	if size > 0{
+		nextIndexInit = size - 1
+	}
+	for index := range rf.nextIndex{
+		rf.nextIndex[index] = nextIndexInit
+	}
+	rf.matchIndex = make([]int, len(rf.peers))
+
 	rf.role = 0
 	rf.delay = rf.generateDelay()
+	rf.cond = sync.NewCond(rf.mu)
+	rf.applyCh = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
@@ -474,25 +556,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			cacheTerm := rf.currentTerm
 			cacheLastIndex := len(rf.log)
 			cacheLastTerm := 0
-			if cacheLastIndex != 0{
-				cacheLastTerm = rf.log[cacheLastIndex - 1].Term
+			if cacheLastIndex != 0 {
+				cacheLastTerm = rf.log[cacheLastIndex-1].Term
 			}
 			timeOut := rf.delay
 			rf.mu.Unlock()
 
-			req := &RequestVoteArgs{Term: cacheTerm, CandidateId: cacheMe, LastLogTerm:cacheLastTerm, LastLogIndex:cacheLastIndex}
+			req := &RequestVoteArgs{Term: cacheTerm, CandidateId: cacheMe, LastLogTerm: cacheLastTerm, LastLogIndex: cacheLastIndex}
 			//send req
 			majority := len(rf.peers) / 2
 			start := time.Now()
 			DPrintf("rf.me:%v<rf.term:%v> request for election:", rf.me, rf.currentTerm)
 
-			voteChan := make(chan int, 100)//limit connected hosts to 100
+			voteChan := make(chan int, 100) //limit connected hosts to 100
 			for i := 0; i < len(rf.peers); i++ {
 				if i == cacheMe {
 					continue
 				}
 
-				go func(i int, req RequestVoteArgs, rf*Raft) {
+				go func(i int, req RequestVoteArgs, rf *Raft) {
 					rsp := &RequestVoteReply{}
 					ret := rf.sendRequestVoteWithTimeOut(i, &req, rsp, 50)
 					DPrintf("rf.me:%v request for election: req:%v ret:%v rsp:%v", cacheMe, i, ret, rsp)
@@ -503,7 +585,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					}
 					if ret && rsp.Term > req.Term {
 						rf.mu.Lock()
-						if rsp.Term > rf.currentTerm{
+						if rsp.Term > rf.currentTerm {
 							rf.switchToFollower(rsp.Term)
 							DPrintf("rf.me:%v request for election: req:%v Switch Role to follower", rf.me, i)
 						}
@@ -516,10 +598,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 			//loop until the rf win this election or time out
 			cnt := 1
-			for cnt <= majority{
+			for cnt <= majority {
 				mills := timeOut.Sub(time.Now())
 				DPrintf("wake after : %v", mills)
-				if mills < 0{
+				if mills < 0 {
 					break
 				}
 				select {
