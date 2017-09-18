@@ -205,17 +205,31 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//I think the RPC that make sense here should be in curTerm
 	//as the paper listed what should be done when encounter newer or older term in request
 	//so the delay should be reset
+	//take care of election restriction(5.4.1) vote if candidate is more up to date.
 	if rf.role == 0 {
 		//reset time out delay
 		rf.delay = rf.generateDelay()
 
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		//todo : check log is up to date
-		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-			rf.votedFor = args.CandidateId
+		//check log is up to date
+		if rf.votedFor == args.CandidateId {
 			reply.VoteGranted = true
+			return
 		}
+
+		if rf.votedFor == -1{
+			//vote for this candidate if last entries of this raft is not later than the request
+			//and if the term is the same, candidate's log should not be smaller than the current raft
+			//or deny this requeset
+			if rf.log[rf.commitIndex].Term <= args.LastLogTerm && rf.commitIndex <= args.LastLogIndex {
+				rf.votedFor = args.CandidateId
+				reply.VoteGranted = true
+				return
+			}
+			return
+		}
+
 		return
 	}
 
