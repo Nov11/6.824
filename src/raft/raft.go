@@ -422,17 +422,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go func(rf *Raft) {
 		for true {
 			rf.mu.Lock()
-			//if rf.role == 2 {
-			//	rf.mu.Unlock()
-			//	return
-			//}
-
-			//rf.delay -= 300
-			//if rf.delay > 0 {
-			//	rf.mu.Unlock()
-			//	time.Sleep(300 * time.Millisecond)
-			//	continue
-			//}
 			d := rf.getDelayDiffFromNow()
 			rf.mu.Unlock()
 			//better be sleep until, i think
