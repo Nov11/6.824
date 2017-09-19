@@ -186,7 +186,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.switchToFollower(args.Term)
 		rf.votedFor = args.CandidateId
-		rf.delay = rf.generateDelay()
+		//rf.delay = rf.generateDelay()
 
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true //rf vote the candidate in newer term
@@ -266,7 +266,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.switchToFollower(args.Term)
 		rf.votedFor = args.LeaderId
-		rf.delay = rf.generateDelay()
+		//rf.delay = rf.generateDelay()
 
 		reply.Term = rf.currentTerm
 		reply.Success = true
@@ -287,7 +287,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.role == 1 {
 		rf.switchToFollower(args.Term)
 		rf.votedFor = args.LeaderId
-		rf.delay = rf.generateDelay()
+		//rf.delay = rf.generateDelay()
 
 		reply.Term = rf.currentTerm
 		reply.Success = true
@@ -420,7 +420,10 @@ func (rf *Raft) replicateLog(command interface{}) {
 	rf.mu.Unlock()
 	accepted := make(chan int, 100)
 	for i := 0; i < len(rf.peers); i++ {
-		go rf.replicateThisLogRPC(request, &accepted)
+		if i == rf.me{
+			continue
+		}
+		go rf.replicateThisLogRPC(i, request, accepted)
 	}
 
 	cnt := 1
@@ -431,8 +434,7 @@ func (rf *Raft) replicateLog(command interface{}) {
 		}
 	}
 
-
-	msg := ApplyMsg{Index: request.PrevLogIndex + 1, Command:command}
+	msg := ApplyMsg{Index: request.PrevLogIndex + 1, Command: command}
 	rf.applyCh <- msg
 
 	//make sure this log entry is append to all followers
@@ -445,11 +447,56 @@ func (rf *Raft) replicateLog(command interface{}) {
 	}
 }
 
-func (rf *Raft) replicateThisLogRPC(args AppendEntriesArgs, acc *chan int) {
-	//set entries to this args
+func (rf *Raft) replicateThisLogRPC(i int, args AppendEntriesArgs, acc chan int) {
+	for true{
+		//set entries to this args
+		rf.mu.Lock()
+		next := rf.nextIndex[i]
+		if next != 0{
+			next = next - 1
+		}
+		args.Entries = rf.log[next:]
+		rf.mu.Unlock()
 
-	//send rpc
-	//
+
+		//send rpc
+		ret, reply := sendAppendEntriesRPC(i, rf, args)
+		//ret == false means connection failed. try later.
+		if ret == false{
+			time.Sleep(20 * time.Millisecond)
+			DPrintf("rf.me:%v replicate log to %v: req:%v ret:%v rsp:%v [connection failed, retry later]", rf.me, i, args, ret, reply)
+			continue
+		}
+
+		//connection is ok.
+		if reply.Success == false {
+			rf.mu.Lock()
+			if rf.role == 0{
+				//this leader's term is stale
+				//and state has already fall back to follower on receiving reply
+				//no need to replicate command any more
+				DPrintf("rf.me:%v replicate log to %v: req:%v ret:%v rsp:%v [fall back to follower]", rf.me, i, args, ret, reply)
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+
+			//peer doesn't contain entry at prevLogIndex with term == prevLogTerm
+			//so here decrease corresponding nextIndex and try again
+			//whenever nextIndex == 0, the reply must be true. so this loop is guaranteed to be terminated
+			rf.mu.Lock()
+			rf.nextIndex[i] = rf.nextIndex[i] - 1
+			DPrintf("rf.me:%v replicate log to %v: req:%v ret:%v rsp:%v [decrease nextIndex to %v]", rf.me, i, args, ret, reply, rf.nextIndex[i])
+			rf.mu.Unlock()
+			continue
+		}
+
+		//reply.Success == true
+		//log is replicated to peer[i], report this acceptance
+		acc <- 1
+		DPrintf("rf.me:%v replicate log to %v: req:%v ret:%v rsp:%v [success]", rf.me, i, args, ret, reply)
+		return
+	}
 }
 
 //
@@ -476,6 +523,7 @@ func (rf *Raft) switchToFollower(term int) {
 	rf.role = 0
 	rf.votedFor = -1
 	rf.currentTerm = term
+	rf.delay = rf.generateDelay()
 }
 
 //
@@ -505,10 +553,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	size := len(rf.log)
 	rf.nextIndex = make([]int, len(rf.peers))
 	nextIndexInit := 0
-	if size > 0{
+	if size > 0 {
 		nextIndexInit = size - 1
 	}
-	for index := range rf.nextIndex{
+	for index := range rf.nextIndex {
 		rf.nextIndex[index] = nextIndexInit
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
@@ -656,7 +704,11 @@ func heartBeat(rf *Raft) {
 	}
 }
 
-func sendHeartBeat(i int, rf *Raft, args AppendEntriesArgs) {
+func sendHeartBeat(i int, rf *Raft, args AppendEntriesArgs){
+	sendAppendEntriesRPC(i, rf, args)
+}
+
+func sendAppendEntriesRPC(i int, rf *Raft, args AppendEntriesArgs) (bool,AppendEntriesReply) {
 	appRsp := &AppendEntriesReply{}
 
 	ret := rf.sendAppendEntries(i, &args, appRsp)
@@ -665,5 +717,5 @@ func sendHeartBeat(i int, rf *Raft, args AppendEntriesArgs) {
 		rf.switchToFollower(appRsp.Term)
 		rf.mu.Unlock()
 	}
-
+	return ret, *appRsp
 }
