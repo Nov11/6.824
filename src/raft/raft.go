@@ -161,6 +161,10 @@ func (ra *RequestVoteArgs) String() string    { return fmt.Sprintf("RequestVoteA
 func (rp *RequestVoteReply) String() string   { return fmt.Sprintf("RequestVoteReply: <rp.term:%v, rp.granted:%v>", rp.Term, rp.VoteGranted); }
 func (aa *AppendEntriesArgs) String() string  { return fmt.Sprintf("AppendEntriesArgs: <aa.Term: %v, aa.LeaderId:%v>", aa.Term, aa.LeaderId); }
 func (ap *AppendEntriesReply) String() string { return fmt.Sprintf("AppendEntriesReply: <ap.Term:%v, ap.Suc:%v>", ap.Term, ap.Success); }
+func (rf *Raft) saveContent() Raft {
+	ret := Raft{me: rf.me, role: rf.role, currentTerm: rf.currentTerm, votedFor: rf.votedFor}
+	return ret
+}
 
 //
 // example RequestVote RPC handler.
@@ -170,7 +174,7 @@ func (ap *AppendEntriesReply) String() string { return fmt.Sprintf("AppendEntrie
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	ori := *rf
+	ori := rf.saveContent()
 
 	defer rf.mu.Unlock()
 	defer DPrintf("RequestVote ori rf : %v  rf : %v args : %v reply : %v\n", &ori, rf, args, reply)
@@ -250,7 +254,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	ori := *rf
+	ori := rf.saveContent()
 
 	defer rf.mu.Unlock()
 	defer DPrintf("AppendEntries ori rf : %v  rf : %v args : %v reply : %v\n", &ori, rf, args, reply)
@@ -268,7 +272,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		fillReply(reply, rf, args)
 
-		if len(args.Entries) == 0{
+		if len(args.Entries) == 0 {
 			return
 		}
 	}
@@ -290,7 +294,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//rf.delay = rf.generateDelay()
 
 		fillReply(reply, rf, args)
-		if len(args.Entries) == 0{
+		if len(args.Entries) == 0 {
 			return
 		}
 	}
@@ -304,7 +308,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.votedFor = args.LeaderId
 
 	fillReply(reply, rf, args)
-	if len(args.Entries) == 0{
+	if len(args.Entries) == 0 {
 		return
 	}
 	if reply.Success == false {
@@ -315,7 +319,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//curLogSize := len(rf.log)
 	newEntryIndex := args.PrevLogIndex + 1
 	//if curLogSize >= newEntryIndex && rf.log[newEntryIndex-1].Term != args.Entries[0].Term {
-		rf.log = rf.log[:newEntryIndex-1]
+	rf.log = rf.log[:newEntryIndex-1]
 	//}
 	//append new entry
 	rf.log = append(rf.log, args.Entries...)
@@ -339,13 +343,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	return
 }
 
-func (rf *Raft) applyCommand() bool{
+func (rf *Raft) applyCommand() bool {
 	rf.mu.Lock()
 	ret := false
 	if rf.commitIndex > rf.lastApplied {
 		ret = true
 		applyThis := rf.lastApplied + 1
-		msg := ApplyMsg{Index: applyThis, Command: rf.log[applyThis - 1]}
+		msg := ApplyMsg{Index: applyThis, Command: rf.log[applyThis-1].Command}
 		rf.applyCh <- msg
 		rf.lastApplied = applyThis
 	}
@@ -456,13 +460,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		cmd := Entry{Term: rf.currentTerm, Command: command}
 		rf.log = append(rf.log, cmd)
-		go rf.replicateLog(command, index)
+		go rf.replicateLog(index)
 	}
 
 	return index, term, isLeader
 }
 
-func (rf *Raft) replicateLog(command interface{}, index int) {
+func (rf *Raft) replicateLog(index int) {
 	//1.append command to rf's own log
 	//2.issue append entry rpc
 	//3.if it's safe to apply this command, apply it to state machine
@@ -481,11 +485,11 @@ func (rf *Raft) replicateLog(command interface{}, index int) {
 	for rf.role == 2 && rf.commitIndex != previousIndex {
 		rf.cond.Wait()
 	}
-	if rf.role != 2{
+	if rf.role != 2 {
 		return
 	}
 
-	request := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, LeaderCommit: rf.commitIndex, PrevLogIndex:previousIndex, PrevLogTerm:previousTerm}
+	request := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, LeaderCommit: rf.commitIndex, PrevLogIndex: previousIndex, PrevLogTerm: previousTerm}
 	size := len(rf.peers)
 	rf.mu.Unlock()
 	accepted := make(chan int, 100)
@@ -497,7 +501,7 @@ func (rf *Raft) replicateLog(command interface{}, index int) {
 	}
 
 	cnt := 1
-	updated := make([]int, len(rf.peers))
+	updated := []int{}
 	for cnt < size/2+1 {
 		select {
 		case idx := <-accepted:
@@ -508,8 +512,8 @@ func (rf *Raft) replicateLog(command interface{}, index int) {
 
 	rf.mu.Lock()
 	rf.commitIndex = rf.commitIndex + 1
-	for index := range updated{
-		rf.matchIndex[index] = max(rf.matchIndex[index], rf.commitIndex)
+	for _, server := range updated {
+		rf.matchIndex[server] = max(rf.matchIndex[server], rf.commitIndex)
 	}
 	rf.mu.Unlock()
 	rf.applyCommand()
@@ -521,10 +525,10 @@ func (rf *Raft) replicateLog(command interface{}, index int) {
 	//this is not necessary as channel accepted is with buffer of large enough size
 	for cnt < size {
 		select {
-		case idx :=<-accepted:
+		case idx := <-accepted:
 			cnt = cnt + 1
 			rf.mu.Lock()
-			if rf.matchIndex[idx] < rf.commitIndex{
+			if rf.matchIndex[idx] < rf.commitIndex {
 				rf.matchIndex[idx] = rf.commitIndex
 			}
 			rf.mu.Unlock()
@@ -536,11 +540,11 @@ func (rf *Raft) replicateThisLogRPC(i int, args AppendEntriesArgs, acc chan int)
 	for true {
 		//set entries to this args
 		rf.mu.Lock()
-		if rf.role != 2{
+		if rf.role != 2 {
 			return
 		}
 		next := rf.nextIndex[i]
-		args.Entries = rf.log[next - 1:]
+		args.Entries = rf.log[next-1:]
 		rf.mu.Unlock()
 
 		//send rpc
@@ -641,12 +645,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.role = 0
 	rf.delay = rf.generateDelay()
-	rf.cond = sync.NewCond(rf.mu)
+	rf.cond = sync.NewCond(&rf.mu)
 	rf.applyCh = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	go func(rf *Raft){
+	go func(rf *Raft) {
 		for true {
 			rf.mu.Lock()
 			//shouldApply := rf.commitIndex > rf.lastApplied
@@ -655,7 +659,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			}
 			rf.mu.Unlock()
 
-			for rf.applyCommand(){}
+			for rf.applyCommand() {
+			}
 		}
 	}(rf)
 
@@ -810,10 +815,10 @@ func sendAppendEntriesRPC(i int, rf *Raft, args AppendEntriesArgs) (bool, Append
 	appRsp := &AppendEntriesReply{}
 
 	ret := rf.sendAppendEntries(i, &args, appRsp)
+	rf.mu.Lock()
 	if ret && appRsp.Term > rf.currentTerm {
-		rf.mu.Lock()
 		rf.switchToFollower(appRsp.Term)
-		rf.mu.Unlock()
 	}
+	rf.mu.Unlock()
 	return ret, *appRsp
 }
