@@ -226,7 +226,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			//and if the term is the same, candidate's log should not be smaller than the current raft
 			//or deny this request
 			size := len(rf.log)
-			if size == 0 && args.LastLogTerm >= 1 && args.LastLogIndex >= 0 {
+			if size == 0 {
 				rf.votedFor = args.CandidateId
 				reply.VoteGranted = true
 			} else if rf.log[size-1].Term <= args.LastLogTerm && size <= args.LastLogIndex {
@@ -248,7 +248,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	return
 }
 
-//todo: append logs in 2B
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	ori := *rf
@@ -262,14 +261,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	//todo: some checks on prevLogIndex etc
 	if args.Term > rf.currentTerm {
 		rf.switchToFollower(args.Term)
 		rf.votedFor = args.LeaderId
 		//rf.delay = rf.generateDelay()
 
-		reply.Term = rf.currentTerm
-		reply.Success = true
+		fillReply(reply, rf, args)
+
 		return
 	}
 
@@ -289,22 +287,79 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = args.LeaderId
 		//rf.delay = rf.generateDelay()
 
-		reply.Term = rf.currentTerm
-		reply.Success = true
+		fillReply(reply, rf, args)
 		return
 	}
 
 	//same term, as follower
 	rf.delay = rf.generateDelay() //stay in follower state
-	//todo:add assert
+
 	if rf.votedFor != -1 && rf.votedFor != args.LeaderId {
 		DPrintf("[ERROR]follower of term: %v voted leader: %v but receive appRPC from %v", rf.currentTerm, rf.votedFor, args.LeaderId)
 	}
 	rf.votedFor = args.LeaderId
 
-	reply.Success = true
-	reply.Term = rf.currentTerm
+	fillReply(reply, rf, args)
+
+	if reply.Success == false {
+		return
+	}
+	//if the new entry conflicts with existing ones, delete existing entries and all that follows it
+	curLogSize := len(rf.log)
+	newEntryIndex := args.PrevLogIndex + 1
+	if curLogSize >= newEntryIndex && rf.log[newEntryIndex-1].Term != args.PrevLogTerm {
+		rf.log = rf.log[:newEntryIndex-1]
+	}
+	//append new entry
+	rf.log = append(rf.log, args.Entries...)
+
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log))
+	}
+
+	go func(rf *Raft) {
+		for true {
+			rf.mu.Lock()
+			shouldApply := rf.commitIndex > rf.lastApplied
+			rf.mu.Unlock()
+			if shouldApply {
+				rf.applyCommand()
+			} else {
+				break
+			}
+		}
+	}(rf)
 	return
+}
+
+func (rf *Raft) applyCommand() {
+	rf.mu.Lock()
+	if rf.commitIndex > rf.lastApplied {
+		applyThis := rf.lastApplied + 1
+		msg := ApplyMsg{Index: applyThis, Command: rf.log[applyThis]}
+		rf.applyCh <- msg
+		rf.lastApplied = applyThis
+	}
+	rf.mu.Unlock()
+}
+
+func fillReply(reply *AppendEntriesReply, rf *Raft, args *AppendEntriesArgs) {
+	//this is a heartbeat msg
+	reply.Term = rf.currentTerm
+	if len(args.Entries) == 0 {
+		reply.Success = true
+	} else {
+		//this is meant to append new log entry
+		myLogSize := len(rf.log)
+		//there exits one entry at prevlogindex with prevlogterm
+		if myLogSize == 0 {
+			reply.Success = args.PrevLogIndex == 0 && args.PrevLogTerm == 0
+		} else if myLogSize >= args.PrevLogIndex && rf.log[args.PrevLogIndex-1].Term == args.PrevLogTerm {
+			reply.Success = true
+		} else {
+			reply.Success = false
+		}
+	}
 }
 
 //
@@ -382,27 +437,28 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	size := len(rf.log)
-	index = size + 1
-	term = rf.currentTerm
+
 	isLeader = rf.role == 2
 
 	if isLeader {
-		go rf.replicateLog(command)
+		size := len(rf.log)
+		index = size + 1
+		term = rf.currentTerm
+		cmd := Entry{Term: rf.currentTerm, Command: command}
+		rf.log = append(rf.log, cmd)
+		go rf.replicateLog(command, index)
 	}
 
 	return index, term, isLeader
 }
 
-func (rf *Raft) replicateLog(command interface{}) {
+func (rf *Raft) replicateLog(command interface{}, index int) {
 	//1.append command to rf's own log
 	//2.issue append entry rpc
 	//3.if it's safe to apply this command, apply it to state machine
 	//4.return result to client
 	rf.mu.Lock()
-	cmd := Entry{Term: rf.currentTerm, Command: command}
-	rf.log = append(rf.log, cmd)
-	previousIndex := len(rf.log) - 1
+	previousIndex := index - 1
 	previousTerm := 0
 	if previousIndex != 0 {
 		previousTerm = rf.log[previousIndex-1].Term
@@ -420,7 +476,7 @@ func (rf *Raft) replicateLog(command interface{}) {
 	rf.mu.Unlock()
 	accepted := make(chan int, 100)
 	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me{
+		if i == rf.me {
 			continue
 		}
 		go rf.replicateThisLogRPC(i, request, accepted)
@@ -434,9 +490,16 @@ func (rf *Raft) replicateLog(command interface{}) {
 		}
 	}
 
-	msg := ApplyMsg{Index: request.PrevLogIndex + 1, Command: command}
-	rf.applyCh <- msg
+	rf.mu.Lock()
+	rf.commitIndex = rf.commitIndex + 1
+	rf.mu.Unlock()
+	rf.applyCommand()
+	//msg := ApplyMsg{Index: request.PrevLogIndex + 1, Command: command}
+	//rf.applyCh <- msg
 
+	rf.mu.Lock()
+	rf.cond.Broadcast()
+	rf.mu.Unlock()
 	//make sure this log entry is append to all followers
 	//this is not necessary as channel accepted is with buffer of large enough size
 	for cnt < size {
@@ -448,21 +511,20 @@ func (rf *Raft) replicateLog(command interface{}) {
 }
 
 func (rf *Raft) replicateThisLogRPC(i int, args AppendEntriesArgs, acc chan int) {
-	for true{
+	for true {
 		//set entries to this args
 		rf.mu.Lock()
 		next := rf.nextIndex[i]
-		if next != 0{
+		if next != 0 {
 			next = next - 1
 		}
 		args.Entries = rf.log[next:]
 		rf.mu.Unlock()
 
-
 		//send rpc
 		ret, reply := sendAppendEntriesRPC(i, rf, args)
 		//ret == false means connection failed. try later.
-		if ret == false{
+		if ret == false {
 			time.Sleep(20 * time.Millisecond)
 			DPrintf("rf.me:%v replicate log to %v: req:%v ret:%v rsp:%v [connection failed, retry later]", rf.me, i, args, ret, reply)
 			continue
@@ -471,7 +533,7 @@ func (rf *Raft) replicateThisLogRPC(i int, args AppendEntriesArgs, acc chan int)
 		//connection is ok.
 		if reply.Success == false {
 			rf.mu.Lock()
-			if rf.role == 0{
+			if rf.role == 0 {
 				//this leader's term is stale
 				//and state has already fall back to follower on receiving reply
 				//no need to replicate command any more
@@ -704,11 +766,11 @@ func heartBeat(rf *Raft) {
 	}
 }
 
-func sendHeartBeat(i int, rf *Raft, args AppendEntriesArgs){
+func sendHeartBeat(i int, rf *Raft, args AppendEntriesArgs) {
 	sendAppendEntriesRPC(i, rf, args)
 }
 
-func sendAppendEntriesRPC(i int, rf *Raft, args AppendEntriesArgs) (bool,AppendEntriesReply) {
+func sendAppendEntriesRPC(i int, rf *Raft, args AppendEntriesArgs) (bool, AppendEntriesReply) {
 	appRsp := &AppendEntriesReply{}
 
 	ret := rf.sendAppendEntries(i, &args, appRsp)
