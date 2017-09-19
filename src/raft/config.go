@@ -402,6 +402,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			cfg.mu.Unlock()
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
+				DPrintf("!!!!!!!!!!!!!!!!!one: start: %v index1:%v ok:%v", starts, index1, ok)
 				if ok {
 					index = index1
 					break

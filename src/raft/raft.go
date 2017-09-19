@@ -156,13 +156,13 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-func (rf *Raft) String() string               { return fmt.Sprintf("ME: %v<role:%v curTerm:%v vote:%v>", rf.me, rf.role, rf.currentTerm, rf.votedFor); }
+func (rf *Raft) String() string               { return fmt.Sprintf("ME: %v<role:%v curTerm:%v vote:%v log:%v commitIndex:%v>", rf.me, rf.role, rf.currentTerm, rf.votedFor, rf.log, rf.commitIndex); }
 func (ra *RequestVoteArgs) String() string    { return fmt.Sprintf("RequestVoteArgs: <ra.term:%v, ra.cadi:%v>", ra.Term, ra.CandidateId); }
 func (rp *RequestVoteReply) String() string   { return fmt.Sprintf("RequestVoteReply: <rp.term:%v, rp.granted:%v>", rp.Term, rp.VoteGranted); }
-func (aa *AppendEntriesArgs) String() string  { return fmt.Sprintf("AppendEntriesArgs: <aa.Term: %v, aa.LeaderId:%v>", aa.Term, aa.LeaderId); }
+func (aa *AppendEntriesArgs) String() string  { return fmt.Sprintf("AppendEntriesArgs[heartBeat? %v]: <aa.Term: %v, aa.LeaderId:%v,  aa.PrevLogIndex:%v, aa.PrevLogTerm:%v, aa.Entries:%v>", len(aa.Entries) == 0, aa.Term, aa.LeaderId, aa.PrevLogIndex, aa.PrevLogTerm, aa.Entries); }
 func (ap *AppendEntriesReply) String() string { return fmt.Sprintf("AppendEntriesReply: <ap.Term:%v, ap.Suc:%v>", ap.Term, ap.Success); }
 func (rf *Raft) saveContent() Raft {
-	ret := Raft{me: rf.me, role: rf.role, currentTerm: rf.currentTerm, votedFor: rf.votedFor}
+	ret := Raft{me: rf.me, role: rf.role, currentTerm: rf.currentTerm, votedFor: rf.votedFor, log:rf.log}
 	return ret
 }
 
@@ -273,6 +273,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		fillReply(reply, rf, args)
 
 		if len(args.Entries) == 0 {
+			updateCommitIndex(rf, args)
 			return
 		}
 	}
@@ -295,6 +296,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		fillReply(reply, rf, args)
 		if len(args.Entries) == 0 {
+			updateCommitIndex(rf, args)
 			return
 		}
 	}
@@ -309,6 +311,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	fillReply(reply, rf, args)
 	if len(args.Entries) == 0 {
+		updateCommitIndex(rf, args)
 		return
 	}
 	if reply.Success == false {
@@ -324,9 +327,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//append new entry
 	rf.log = append(rf.log, args.Entries...)
 
-	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, len(rf.log))
-	}
+	updateCommitIndex(rf, args)
 
 	//go func(rf *Raft) {
 	//	for true {
@@ -341,6 +342,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//	}
 	//}(rf)
 	return
+}
+
+func updateCommitIndex(rf *Raft, args *AppendEntriesArgs){
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log))
+		rf.cond.Broadcast()
+	}
 }
 
 func (rf *Raft) applyCommand() bool {
@@ -545,7 +553,16 @@ func (rf *Raft) replicateThisLogRPC(i int, args AppendEntriesArgs, acc chan int)
 		}
 		next := rf.nextIndex[i]
 		args.Entries = rf.log[next-1:]
+		args.PrevLogIndex = next - 1
+		args.PrevLogTerm = 0
+		if args.PrevLogIndex > 0 {
+			args.PrevLogTerm = rf.log[args.PrevLogIndex - 1].Term
+		}
 		rf.mu.Unlock()
+
+		if args.PrevLogIndex < 0 {
+			DPrintf("[ERROR] appendentriesargs prevlogindex < 0")
+		}
 
 		//send rpc
 		ret, reply := sendAppendEntriesRPC(i, rf, args)
@@ -573,7 +590,12 @@ func (rf *Raft) replicateThisLogRPC(i int, args AppendEntriesArgs, acc chan int)
 			//so here decrease corresponding nextIndex and try again
 			//whenever nextIndex == 0, the reply must be true. so this loop is guaranteed to be terminated
 			rf.mu.Lock()
-			rf.nextIndex[i] = rf.nextIndex[i] - 1
+			if rf.nextIndex[i] == args.PrevLogIndex + 1{
+				rf.nextIndex[i] = rf.nextIndex[i] - 1
+				if rf.nextIndex[i] < 1{
+					DPrintf("[ERROR]rf.nextIndex[%v] < 1", i)
+				}
+			}
 			DPrintf("rf.me:%v replicate log to %v: req:%v ret:%v rsp:%v [decrease nextIndex to %v]", rf.me, i, args, ret, reply, rf.nextIndex[i])
 			rf.mu.Unlock()
 			continue
@@ -794,12 +816,25 @@ func heartBeat(rf *Raft) {
 			rf.mu.Unlock()
 			return
 		}
-		appArg := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
 		rf.mu.Unlock()
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
+
+			rf.mu.Lock()
+			appArg := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, LeaderCommit:rf.commitIndex}
+			if len(rf.log) == 0{
+				appArg.PrevLogIndex = 0
+			}else{
+				if rf.nextIndex[i] - 1 > 0{
+					appArg.PrevLogIndex = rf.nextIndex[i] - 1
+					appArg.PrevLogTerm = rf.log[appArg.PrevLogIndex - 1].Term
+				}else{
+					appArg.PrevLogIndex = 0
+				}
+			}
+			rf.mu.Unlock()
 			go sendHeartBeat(i, rf, *appArg)
 		}
 
@@ -808,7 +843,27 @@ func heartBeat(rf *Raft) {
 }
 
 func sendHeartBeat(i int, rf *Raft, args AppendEntriesArgs) {
-	sendAppendEntriesRPC(i, rf, args)
+	ret, reply := sendAppendEntriesRPC(i, rf, args)
+	if ret == false {
+		return
+	}
+
+	if reply.Success{
+		return
+	}
+
+	rf.mu.Lock()
+	if rf.role != 2{
+		return
+	}
+
+	if rf.nextIndex[i] == args.PrevLogIndex + 1{
+		rf.nextIndex[i] = rf.nextIndex[i] - 1
+	}
+	if rf.nextIndex[i] < 1{
+		DPrintf("[ERROR]rf.nextIndex[%v] < 1", i)
+	}
+	rf.mu.Unlock()
 }
 
 func sendAppendEntriesRPC(i int, rf *Raft, args AppendEntriesArgs) (bool, AppendEntriesReply) {
