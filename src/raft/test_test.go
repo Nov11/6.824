@@ -75,7 +75,7 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 //	DPrintf("5th  _______________re-join of last node shouldn't prevent leader from existing.")
 //	fmt.Printf("  ... Passed\n")
 //}
-
+//
 //func TestBasicAgree2B(t *testing.T) {
 //	servers := 5
 //	cfg := make_config(t, servers, false)
@@ -99,88 +99,88 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 //	fmt.Printf("  ... Passed\n")
 //}
 
-func TestFailAgree2B(t *testing.T) {
-	servers := 3
-	cfg := make_config(t, servers, false)
-	defer cfg.cleanup()
-
-	fmt.Printf("Test (2B): agreement despite follower disconnection ...\n")
-
-	cfg.one(101, servers)
-
-	// follower network disconnection
-	leader := cfg.checkOneLeader()
-	cfg.disconnect((leader + 1) % servers)
-	DPrintf("[TEST]%v disconnected", (leader + 1) %servers)
-	// agree despite one disconnected server?
-	cfg.one(102, servers-1)
-	cfg.one(103, servers-1)
-	time.Sleep(RaftElectionTimeout)
-	cfg.one(104, servers-1)
-	cfg.one(105, servers-1)
-
-	// re-connect
-	cfg.connect((leader + 1) % servers)
-	DPrintf("[TEST]%v connected", (leader + 1) %servers)
-	// agree with full set of servers?
-	cfg.one(106, servers)
-	time.Sleep(RaftElectionTimeout)
-	cfg.one(107, servers)
-
-	fmt.Printf("  ... Passed\n")
-}
-
-//func TestFailNoAgree2B(t *testing.T) {
-//	servers := 5
+//func TestFailAgree2B(t *testing.T) {
+//	servers := 3
 //	cfg := make_config(t, servers, false)
 //	defer cfg.cleanup()
 //
-//	fmt.Printf("Test (2B): no agreement if too many followers disconnect ...\n")
+//	fmt.Printf("Test (2B): agreement despite follower disconnection ...\n")
 //
-//	cfg.one(10, servers)
+//	cfg.one(101, servers)
 //
-//	// 3 of 5 followers disconnect
+//	// follower network disconnection
 //	leader := cfg.checkOneLeader()
 //	cfg.disconnect((leader + 1) % servers)
-//	cfg.disconnect((leader + 2) % servers)
-//	cfg.disconnect((leader + 3) % servers)
+//	DPrintf("[TEST]%v disconnected", (leader + 1) %servers)
+//	// agree despite one disconnected server?
+//	cfg.one(102, servers-1)
+//	cfg.one(103, servers-1)
+//	time.Sleep(RaftElectionTimeout)
+//	cfg.one(104, servers-1)
+//	cfg.one(105, servers-1)
 //
-//	index, _, ok := cfg.rafts[leader].Start(20)
-//	if ok != true {
-//		t.Fatalf("leader rejected Start()")
-//	}
-//	if index != 2 {
-//		t.Fatalf("expected index 2, got %v", index)
-//	}
-//
-//	time.Sleep(2 * RaftElectionTimeout)
-//
-//	n, _ := cfg.nCommitted(index)
-//	if n > 0 {
-//		t.Fatalf("%v committed but no majority", n)
-//	}
-//
-//	// repair
+//	// re-connect
 //	cfg.connect((leader + 1) % servers)
-//	cfg.connect((leader + 2) % servers)
-//	cfg.connect((leader + 3) % servers)
-//
-//	// the disconnected majority may have chosen a leader from
-//	// among their own ranks, forgetting index 2.
-//	// or perhaps
-//	leader2 := cfg.checkOneLeader()
-//	index2, _, ok2 := cfg.rafts[leader2].Start(30)
-//	if ok2 == false {
-//		t.Fatalf("leader2 rejected Start()")
-//	}
-//	if index2 < 2 || index2 > 3 {
-//		t.Fatalf("unexpected index %v", index2)
-//	}
-//
-//	cfg.one(1000, servers)
+//	DPrintf("[TEST]%v connected", (leader + 1) %servers)
+//	// agree with full set of servers?
+//	cfg.one(106, servers)
+//	time.Sleep(RaftElectionTimeout)
+//	cfg.one(107, servers)
 //
 //	fmt.Printf("  ... Passed\n")
 //}
+
+func TestFailNoAgree2B(t *testing.T) {
+	servers := 5
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2B): no agreement if too many followers disconnect ...\n")
+
+	cfg.one(10, servers)
+
+	// 3 of 5 followers disconnect
+	leader := cfg.checkOneLeader()
+	cfg.disconnect((leader + 1) % servers)
+	cfg.disconnect((leader + 2) % servers)
+	cfg.disconnect((leader + 3) % servers)
+	DPrintf("[TEST] disconnect %v %v %v", (leader + 1) % servers,(leader + 2) % servers,(leader + 3) % servers)
+	index, _, ok := cfg.rafts[leader].Start(20)
+	if ok != true {
+		t.Fatalf("leader rejected Start()")
+	}
+	if index != 2 {
+		t.Fatalf("expected index 2, got %v", index)
+	}
+
+	time.Sleep(2 * RaftElectionTimeout)
+
+	n, _ := cfg.nCommitted(index)
+	if n > 0 {
+		t.Fatalf("%v committed but no majority", n)
+	}
+
+	// repair
+	cfg.connect((leader + 1) % servers)
+	cfg.connect((leader + 2) % servers)
+	cfg.connect((leader + 3) % servers)
+	DPrintf("[TEST] connect %v %v %v", (leader + 1) % servers,(leader + 2) % servers,(leader + 3) % servers)
+	// the disconnected majority may have chosen a leader from
+	// among their own ranks, forgetting index 2.
+	// or perhaps
+	leader2 := cfg.checkOneLeader()
+	index2, _, ok2 := cfg.rafts[leader2].Start(30)
+	if ok2 == false {
+		t.Fatalf("leader2 rejected Start()")
+	}
+	if index2 < 2 || index2 > 3 {
+		t.Fatalf("unexpected index %v", index2)
+	}
+
+	cfg.one(1000, servers)
+
+	fmt.Printf("  ... Passed\n")
+}
 //
 //func TestConcurrentStarts2B(t *testing.T) {
 //	servers := 3

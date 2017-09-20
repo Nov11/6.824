@@ -291,11 +291,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//rf.delay = rf.generateDelay()
 
 		fillReply(reply, rf, args)
-
+		if reply.Success == false{
+			return
+		}
 		if len(args.Entries) == 0 {
 			updateCommitIndex(rf, args)
 			return
 		}
+
+		//apply entries later
 	}
 
 	//as a leader, drop this
@@ -315,10 +319,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//rf.delay = rf.generateDelay()
 
 		fillReply(reply, rf, args)
+		if reply.Success == false{
+			return
+		}
 		if len(args.Entries) == 0 {
 			updateCommitIndex(rf, args)
 			return
 		}
+
+
+		//apply entries later
 	}
 
 	//same term, as follower
@@ -337,29 +347,31 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		updateCommitIndex(rf, args)
 		return
 	}
-	//if the new entry conflicts with existing ones, delete existing entries and all that follows it
-	//curLogSize := len(rf.log)
-	newEntryIndex := args.PrevLogIndex + 1
-	//if curLogSize >= newEntryIndex && rf.log[newEntryIndex-1].Term != args.Entries[0].Term {
-	rf.log = rf.log[:newEntryIndex-1]
-	//}
-	//append new entry
-	rf.log = append(rf.log, args.Entries...)
+	////if the new entry conflicts with existing ones, delete existing entries and all that follows it
+	////curLogSize := len(rf.log)
+	//newEntryIndex := args.PrevLogIndex + 1
+	////if curLogSize >= newEntryIndex && rf.log[newEntryIndex-1].Term != args.Entries[0].Term {
+	//rf.log = rf.log[:newEntryIndex-1]
+	////}
+	////append new entry
+	//rf.log = append(rf.log, args.Entries...)
+	//
+	//updateCommitIndex(rf, args)
 
-	updateCommitIndex(rf, args)
-
-	//go func(rf *Raft) {
-	//	for true {
-	//		rf.mu.Lock()
-	//		shouldApply := rf.commitIndex > rf.lastApplied
-	//		rf.mu.Unlock()
-	//		if shouldApply {
-	//			rf.applyCommand()
-	//		} else {
-	//			break
-	//		}
-	//	}
-	//}(rf)
+	//[3--10]maybe here before [4-7] arrive, you don't wanna remove 8-10, right?
+	for i := 0; i < len(args.Entries); i++{
+		iter := args.PrevLogIndex + i
+		if iter >= len(rf.log){
+			rf.log = append(rf.log, args.Entries[i])
+		}else {
+			if rf.log[iter].Term == args.Entries[i].Term{
+				//nothing
+			}else{
+				rf.log = rf.log[:iter]
+				rf.log = append(rf.log, args.Entries[i])
+			}
+		}
+	}
 	return
 }
 
@@ -584,6 +596,12 @@ func (rf *Raft) replicateUpThroughThisLogRPC(i int, args AppendEntriesArgs, acc 
 			DPrintf("rf:%v is not a leader any more. current role: %v. stop replicating with last entry:%v", rf.me, rf.role, cmdIndex)
 			rf.mu.Unlock()
 			abort <- i
+			return
+		}
+		if cmdIndex < rf.nextIndex[i] {
+			DPrintf("rf:%v stop replicating with last entry:%v to %v. since nextIndex[i] : %v > cmdIndex:%v", rf.me, rf.log[cmdIndex - 1], i, rf.nextIndex[i], cmdIndex)
+			rf.mu.Unlock()
+			acc <- 1
 			return
 		}
 		next := rf.nextIndex[i]
