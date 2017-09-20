@@ -63,10 +63,10 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	role    int //0:follower 1:candidate 2:leader
-	delay   time.Time
-	commitIndexChanged    *sync.Cond //use this to issue append entry rpcs
-	applyCh chan ApplyMsg
+	role               int //0:follower 1:candidate 2:leader
+	delay              time.Time
+	commitIndexChanged *sync.Cond //use this to issue append entry rpcs
+	applyCh            chan ApplyMsg
 }
 
 type Entry struct {
@@ -162,9 +162,11 @@ func (rp *RequestVoteReply) String() string   { return fmt.Sprintf("RequestVoteR
 func (aa *AppendEntriesArgs) String() string  { return fmt.Sprintf("AppendEntriesArgs[heartBeat? %v]: <aa.Term: %v, aa.LeaderId:%v,  aa.PrevLogIndex:%v, aa.PrevLogTerm:%v, aa.Entries:%v aa.LeaderCommit:%v>", len(aa.Entries) == 0, aa.Term, aa.LeaderId, aa.PrevLogIndex, aa.PrevLogTerm, aa.Entries, aa.LeaderCommit) }
 func (ap *AppendEntriesReply) String() string { return fmt.Sprintf("AppendEntriesReply: <ap.Term:%v, ap.Suc:%v>", ap.Term, ap.Success); }
 func (rf *Raft) saveContent() Raft {
-	ret := Raft{me: rf.me, role: rf.role, currentTerm: rf.currentTerm, votedFor: rf.votedFor, log: rf.log, commitIndex: rf.commitIndex}
+	ret := Raft{me: rf.me, role: rf.role, currentTerm: rf.currentTerm, votedFor: rf.votedFor, commitIndex: rf.commitIndex, log: make([]Entry, len(rf.log))}
+	copy(ret.log, rf.log)
 	return ret
 }
+func (msg *ApplyMsg) String() string { return fmt.Sprintf("ApplyMsg< msg.Command:%v, msg.Index:%v>", msg.Command, msg.Index) }
 
 //
 // example RequestVote RPC handler.
@@ -189,7 +191,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//rf is in old term, so turns to follower and take args.CandidateId as new leader
 	if args.Term > rf.currentTerm {
 		//if the leader is not update-to-date than current raft instance, reject this
-		if !isPeerMoreUpdateToDate(rf, args) {
+		if !isPeerNotLessUpdateThanCurrentRaft(rf, args) {
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 			return
@@ -228,7 +230,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		//check log is up to date
 		if rf.votedFor == args.CandidateId {
-			if isPeerMoreUpdateToDate(rf, args) {
+			if isPeerNotLessUpdateThanCurrentRaft(rf, args) {
 				reply.VoteGranted = true
 			} else {
 				DPrintf("voting [deny with equal candidate]cur rf:%v args:%v", rf, args)
@@ -241,7 +243,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			//vote for this candidate if last entries of this raft is not later than the request
 			//and if the term is the same, candidate's log should not be smaller than the current raft
 			//or deny this request
-			ret := isPeerMoreUpdateToDate(rf, args)
+			ret := isPeerNotLessUpdateThanCurrentRaft(rf, args)
 			if ret {
 				rf.votedFor = args.CandidateId
 				reply.VoteGranted = true
@@ -259,11 +261,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 	return
 }
-func isPeerMoreUpdateToDate(rf *Raft, args *RequestVoteArgs) bool {
+func isPeerNotLessUpdateThanCurrentRaft(rf *Raft, args *RequestVoteArgs) bool {
 	size := len(rf.log)
 	if size == 0 {
 		return true
-	} else if rf.log[size-1].Term <= args.LastLogTerm && size <= args.LastLogIndex {
+	} else if rf.log[size-1].Term < args.LastLogTerm {
+		return true
+	} else if rf.log[size-1].Term == args.LastLogTerm && size <= args.LastLogIndex {
 		return true
 	}
 	return false
@@ -278,7 +282,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		s = "replicate"
 	}
 	defer DPrintf("AppendEntries[%s] ori rf : %v  rf : %v args : %v reply : %v\n", s, &ori, rf, args, reply)
-
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -291,7 +294,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//rf.delay = rf.generateDelay()
 
 		fillReply(reply, rf, args)
-		if reply.Success == false{
+		if reply.Success == false {
 			return
 		}
 		if len(args.Entries) == 0 {
@@ -319,14 +322,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//rf.delay = rf.generateDelay()
 
 		fillReply(reply, rf, args)
-		if reply.Success == false{
+		if reply.Success == false {
 			return
 		}
 		if len(args.Entries) == 0 {
 			updateCommitIndex(rf, args)
 			return
 		}
-
 
 		//apply entries later
 	}
@@ -359,14 +361,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//updateCommitIndex(rf, args)
 
 	//[3--10]maybe here before [4-7] arrive, you don't wanna remove 8-10, right?
-	for i := 0; i < len(args.Entries); i++{
+	for i := 0; i < len(args.Entries); i++ {
 		iter := args.PrevLogIndex + i
-		if iter >= len(rf.log){
+		if iter >= len(rf.log) {
 			rf.log = append(rf.log, args.Entries[i])
-		}else {
-			if rf.log[iter].Term == args.Entries[i].Term{
+		} else {
+			if rf.log[iter].Term == args.Entries[i].Term {
 				//nothing
-			}else{
+			} else {
 				rf.log = rf.log[:iter]
 				rf.log = append(rf.log, args.Entries[i])
 			}
@@ -392,7 +394,7 @@ func (rf *Raft) applyCommand() bool {
 		msg := ApplyMsg{Index: applyThis, Command: rf.log[applyThis-1].Command}
 		rf.applyCh <- msg
 		rf.lastApplied = applyThis
-		DPrintf("[Apply] rf:%v applied: %v", rf.me, msg)
+		DPrintf("[Apply] rf:%v applied: %v", rf.me, &msg)
 	}
 	rf.mu.Unlock()
 	return ret
@@ -401,20 +403,20 @@ func (rf *Raft) applyCommand() bool {
 func fillReply(reply *AppendEntriesReply, rf *Raft, args *AppendEntriesArgs) {
 	//this is a heartbeat msg
 	reply.Term = rf.currentTerm
-	if len(args.Entries) == 0 {
+	//if len(args.Entries) == 0 {
+	//	reply.Success = true
+	//} else {
+	//this is meant to append new log entry
+	myLogSize := len(rf.log)
+	//there exits one entry at prevlogindex with prevlogterm
+	if myLogSize == 0 {
+		reply.Success = args.PrevLogIndex == 0 //&& args.PrevLogTerm == 0
+	} else if myLogSize >= args.PrevLogIndex && (args.PrevLogIndex == 0 || rf.log[args.PrevLogIndex-1].Term == args.PrevLogTerm) {
 		reply.Success = true
 	} else {
-		//this is meant to append new log entry
-		myLogSize := len(rf.log)
-		//there exits one entry at prevlogindex with prevlogterm
-		if myLogSize == 0 {
-			reply.Success = args.PrevLogIndex == 0 //&& args.PrevLogTerm == 0
-		} else if myLogSize >= args.PrevLogIndex && (args.PrevLogIndex == 0 || rf.log[args.PrevLogIndex-1].Term == args.PrevLogTerm) {
-			reply.Success = true
-		} else {
-			reply.Success = false
-		}
+		reply.Success = false
 	}
+	//}
 }
 
 //
@@ -558,7 +560,7 @@ func (rf *Raft) replicateLog(index int) {
 	}
 
 	rf.mu.Lock()
-	if rf.commitIndex < index{
+	if rf.commitIndex < index {
 		rf.commitIndex = index
 		rf.commitIndexChanged.Broadcast()
 	}
@@ -570,7 +572,6 @@ func (rf *Raft) replicateLog(index int) {
 	//rf.applyCommand()
 	//msg := ApplyMsg{Index: request.PrevLogIndex + 1, Command: command}
 	//rf.applyCh <- msg
-
 
 	rf.mu.Lock()
 	DPrintf("[REPLICATE] [Done] log replicated to majority: command:%v", rf.log[index-1].Command)
@@ -604,7 +605,7 @@ func (rf *Raft) replicateUpThroughThisLogRPC(i int, args AppendEntriesArgs, acc 
 			return
 		}
 		if cmdIndex < rf.nextIndex[i] {
-			DPrintf("rf:%v stop replicating with last entry:%v to %v. since nextIndex[i] : %v > cmdIndex:%v", rf.me, rf.log[cmdIndex - 1], i, rf.nextIndex[i], cmdIndex)
+			DPrintf("rf:%v stop replicating with last entry:%v to %v. since nextIndex[i] : %v > cmdIndex:%v", rf.me, rf.log[cmdIndex-1], i, rf.nextIndex[i], cmdIndex)
 			rf.mu.Unlock()
 			acc <- 1
 			return
@@ -885,27 +886,37 @@ func heartBeat(rf *Raft) {
 			}
 
 			rf.mu.Lock()
-			appArg := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, LeaderCommit: rf.commitIndex}
-			if len(rf.log) == 0 {
-				appArg.PrevLogIndex = 0
+			if rf.nextIndex[i] > len(rf.log) {
+				go sendHeartBeat(i, rf)
 			} else {
-				if rf.nextIndex[i]-1 > 0 {
-					appArg.PrevLogIndex = rf.nextIndex[i] - 1
-					appArg.PrevLogTerm = rf.log[appArg.PrevLogIndex-1].Term
-				} else {
-					appArg.PrevLogIndex = 0
-				}
+				request := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, LeaderCommit: rf.commitIndex}
+				acc := make(chan int, 1)
+				abort := make(chan int, 1)
+				go rf.replicateUpThroughThisLogRPC(i, request, acc, len(rf.log), abort)
 			}
 			rf.mu.Unlock()
-			go sendHeartBeat(i, rf, *appArg)
+
 		}
 
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-func sendHeartBeat(i int, rf *Raft, args AppendEntriesArgs) {
-	ret, reply := sendAppendEntriesRPC(i, rf, args)
+func sendHeartBeat(i int, rf *Raft) {
+	rf.mu.Lock()
+	appArg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, LeaderCommit: rf.commitIndex}
+	if len(rf.log) == 0 {
+		appArg.PrevLogIndex = 0
+	} else {
+		if rf.nextIndex[i]-1 > 0 {
+			appArg.PrevLogIndex = rf.nextIndex[i] - 1
+			appArg.PrevLogTerm = rf.log[appArg.PrevLogIndex-1].Term
+		} else {
+			appArg.PrevLogIndex = 0
+		}
+	}
+	rf.mu.Unlock()
+	ret, reply := sendAppendEntriesRPC(i, rf, appArg)
 	if ret == false {
 		return
 	}
@@ -920,7 +931,7 @@ func sendHeartBeat(i int, rf *Raft, args AppendEntriesArgs) {
 		return
 	}
 
-	if rf.nextIndex[i] == args.PrevLogIndex+1 {
+	if rf.nextIndex[i] == appArg.PrevLogIndex+1 {
 		rf.nextIndex[i] = rf.nextIndex[i] - 1
 	}
 	if rf.nextIndex[i] < 1 {
