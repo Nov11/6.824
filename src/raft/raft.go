@@ -408,7 +408,7 @@ func fillReply(reply *AppendEntriesReply, rf *Raft, args *AppendEntriesArgs) {
 		//there exits one entry at prevlogindex with prevlogterm
 		if myLogSize == 0 {
 			reply.Success = args.PrevLogIndex == 0 //&& args.PrevLogTerm == 0
-		} else if myLogSize >= args.PrevLogIndex && rf.log[args.PrevLogIndex-1].Term == args.PrevLogTerm {
+		} else if myLogSize >= args.PrevLogIndex && (args.PrevLogIndex == 0 || rf.log[args.PrevLogIndex-1].Term == args.PrevLogTerm) {
 			reply.Success = true
 		} else {
 			reply.Success = false
