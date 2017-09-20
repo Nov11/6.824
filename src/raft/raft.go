@@ -392,6 +392,7 @@ func (rf *Raft) applyCommand() bool {
 		msg := ApplyMsg{Index: applyThis, Command: rf.log[applyThis-1].Command}
 		rf.applyCh <- msg
 		rf.lastApplied = applyThis
+		DPrintf("[Apply] rf:%v applied: %v", rf.me, msg)
 	}
 	rf.mu.Unlock()
 	return ret
@@ -557,16 +558,20 @@ func (rf *Raft) replicateLog(index int) {
 	}
 
 	rf.mu.Lock()
-	rf.commitIndex = index
+	if rf.commitIndex < index{
+		rf.commitIndex = index
+		rf.commitIndexChanged.Broadcast()
+	}
+
 	for _, server := range updated {
 		rf.matchIndex[server] = max(rf.matchIndex[server], rf.commitIndex)
 	}
 	rf.mu.Unlock()
-	rf.applyCommand()
+	//rf.applyCommand()
 	//msg := ApplyMsg{Index: request.PrevLogIndex + 1, Command: command}
 	//rf.applyCh <- msg
 
-	rf.commitIndexChanged.Broadcast()
+
 	rf.mu.Lock()
 	DPrintf("[REPLICATE] [Done] log replicated to majority: command:%v", rf.log[index-1].Command)
 	rf.mu.Unlock()
