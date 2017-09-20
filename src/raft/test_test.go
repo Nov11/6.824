@@ -76,60 +76,60 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 //	fmt.Printf("  ... Passed\n")
 //}
 
-func TestBasicAgree2B(t *testing.T) {
-	servers := 5
+//func TestBasicAgree2B(t *testing.T) {
+//	servers := 5
+//	cfg := make_config(t, servers, false)
+//	defer cfg.cleanup()
+//
+//	fmt.Printf("Test (2B): basic agreement ...\n")
+//
+//	iters := 3
+//	for index := 1; index < iters+1; index++ {
+//		nd, _ := cfg.nCommitted(index)
+//		if nd > 0 {
+//			t.Fatalf("some have committed before Start()")
+//		}
+//DPrintf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+//		xindex := cfg.one(index*100, servers)
+//		if xindex != index {
+//			t.Fatalf("got index %v but expected %v", xindex, index)
+//		}
+//	}
+//
+//	fmt.Printf("  ... Passed\n")
+//}
+
+func TestFailAgree2B(t *testing.T) {
+	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
-	fmt.Printf("Test (2B): basic agreement ...\n")
+	fmt.Printf("Test (2B): agreement despite follower disconnection ...\n")
 
-	iters := 3
-	for index := 1; index < iters+1; index++ {
-		nd, _ := cfg.nCommitted(index)
-		if nd > 0 {
-			t.Fatalf("some have committed before Start()")
-		}
-DPrintf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		xindex := cfg.one(index*100, servers)
-		if xindex != index {
-			t.Fatalf("got index %v but expected %v", xindex, index)
-		}
-	}
+	cfg.one(101, servers)
+
+	// follower network disconnection
+	leader := cfg.checkOneLeader()
+	cfg.disconnect((leader + 1) % servers)
+	DPrintf("[TEST]%v disconnected", (leader + 1) %servers)
+	// agree despite one disconnected server?
+	cfg.one(102, servers-1)
+	cfg.one(103, servers-1)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(104, servers-1)
+	cfg.one(105, servers-1)
+
+	// re-connect
+	cfg.connect((leader + 1) % servers)
+	DPrintf("[TEST]%v connected", (leader + 1) %servers)
+	// agree with full set of servers?
+	cfg.one(106, servers)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(107, servers)
 
 	fmt.Printf("  ... Passed\n")
 }
 
-//func TestFailAgree2B(t *testing.T) {
-//	servers := 3
-//	cfg := make_config(t, servers, false)
-//	defer cfg.cleanup()
-//
-//	fmt.Printf("Test (2B): agreement despite follower disconnection ...\n")
-//
-//	cfg.one(101, servers)
-//
-//	// follower network disconnection
-//	leader := cfg.checkOneLeader()
-//	cfg.disconnect((leader + 1) % servers)
-//
-//	// agree despite one disconnected server?
-//	cfg.one(102, servers-1)
-//	cfg.one(103, servers-1)
-//	time.Sleep(RaftElectionTimeout)
-//	cfg.one(104, servers-1)
-//	cfg.one(105, servers-1)
-//
-//	// re-connect
-//	cfg.connect((leader + 1) % servers)
-//
-//	// agree with full set of servers?
-//	cfg.one(106, servers)
-//	time.Sleep(RaftElectionTimeout)
-//	cfg.one(107, servers)
-//
-//	fmt.Printf("  ... Passed\n")
-//}
-//
 //func TestFailNoAgree2B(t *testing.T) {
 //	servers := 5
 //	cfg := make_config(t, servers, false)
