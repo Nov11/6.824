@@ -191,6 +191,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//rf is in old term, so turns to follower and take args.CandidateId as new leader
 	if args.Term > rf.currentTerm {
+		rf.switchToFollower(args.Term)
 		//if the leader is not update-to-date than current raft instance, reject this
 		if !isPeerNotLessUpdateThanCurrentRaft(rf, args) {
 			reply.Term = rf.currentTerm
@@ -198,7 +199,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			return
 		}
 
-		rf.switchToFollower(args.Term)
 		rf.votedFor = args.CandidateId
 		//rf.delay = rf.generateDelay()
 
@@ -556,10 +556,12 @@ func (rf *Raft) replicateLog(index int) {
 			cnt = cnt + 1
 			updated = append(updated, idx)
 		case exit := <-abort:
-			DPrintf("one [%v]replicateUpThroughThisLogRPC return abort, so stop replicating entries up through %v[entry is not committed]", exit, index)
+			//DPrintf("one [%v]replicateUpThroughThisLogRPC return abort, so stop replicating entries up through %v[entry is not committed]", exit, index)
+			exit = exit + 1
 			return
 		case d := <-duplicate:
-			DPrintf("one [%v]replicateUpThroughThisLogRPC return duplicate. entry %v is being replicating. quit current process.[entry is not committed]", d, index)
+			//DPrintf("one [%v]replicateUpThroughThisLogRPC return duplicate. entry %v is being replicating. quit current process.[entry is not committed]", d, index)
+			d = d + 1
 			return
 		}
 	}
@@ -593,10 +595,12 @@ func (rf *Raft) replicateLog(index int) {
 			}
 			rf.mu.Unlock()
 		case exit := <-abort:
-			DPrintf("one [%v]replicateUpThroughThisLogRPC return [abort], so stop replicating entries up through %v[entry is committed]", exit, index)
+			//DPrintf("one [%v]replicateUpThroughThisLogRPC return [abort], so stop replicating entries up through %v[entry is committed]", exit, index)
+			exit = exit + 1
 			return
 		case d := <-duplicate:
-			DPrintf("one [%v]replicateUpThroughThisLogRPC return [duplicate]. entry %v is being replicating. quit current process.[entry is committed]", d, index)
+			//DPrintf("one [%v]replicateUpThroughThisLogRPC return [duplicate]. entry %v is being replicating. quit current process.[entry is committed]", d, index)
+			d = d + 1
 			return
 		}
 	}
@@ -608,20 +612,20 @@ func (rf *Raft) replicateUpThroughThisLogRPC(i int, args AppendEntriesArgs, acc 
 		//set entries to this args
 		rf.mu.Lock()
 		if rf.role != 2 {
-			DPrintf("rf:%v is not a leader any more. current role: %v. stop replicating with last entry:%v", rf.me, rf.role, cmdIndex)
+			//DPrintf("rf:%v is not a leader any more. current role: %v. stop replicating with last entry:%v", rf.me, rf.role, cmdIndex)
 			rf.mu.Unlock()
 			abort <- i
 			return
 		}
 		if cmdIndex < rf.nextIndex[i] {
-			DPrintf("rf:%v stop replicating with last entry:%v to %v. since nextIndex[i] : %v > cmdIndex:%v", rf.me, rf.log[cmdIndex-1], i, rf.nextIndex[i], cmdIndex)
+			//DPrintf("rf:%v stop replicating with last entry:%v to %v. since nextIndex[i] : %v > cmdIndex:%v", rf.me, rf.log[cmdIndex-1], i, rf.nextIndex[i], cmdIndex)
 			rf.mu.Unlock()
 			dup <- i
 			return
 		}
 
 		if (!updateReplictingIndex && cmdIndex <= rf.highestReplicatingIndex[i]) || (updateReplictingIndex && cmdIndex != rf.highestReplicatingIndex[i]) {
-			DPrintf("rf:%v stop replicating with last entry:%v to %v. since a higher index cmd[index:%v] > [cur:%v] is being replicating.", rf.me, rf.log[cmdIndex-1], i, rf.highestReplicatingIndex[i], cmdIndex)
+			//DPrintf("rf:%v stop replicating with last entry:%v to %v. since a higher index cmd[index:%v] > [cur:%v] is being replicating.", rf.me, rf.log[cmdIndex-1], i, rf.highestReplicatingIndex[i], cmdIndex)
 			rf.mu.Unlock()
 			dup <- i
 			return
