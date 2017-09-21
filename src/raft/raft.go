@@ -23,6 +23,8 @@ import (
 	"math/rand"
 	"time"
 	"fmt"
+	"bytes"
+	"encoding/gob"
 )
 
 // import "bytes"
@@ -117,6 +119,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -132,6 +141,11 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
 }
 
 //
@@ -169,6 +183,21 @@ func (rf *Raft) saveContent() Raft {
 }
 func (msg *ApplyMsg) String() string { return fmt.Sprintf("ApplyMsg< msg.Command:%v, msg.Index:%v>", msg.Command, msg.Index) }
 
+func (rf *Raft) setVotedFor(newVal int) {
+	rf.votedFor = newVal
+	rf.persist()
+}
+
+func (rf *Raft) setLog(newLog []Entry) {
+	rf.log = newLog
+	rf.persist()
+}
+
+func (rf *Raft) setCommitIndex(newIdx int) {
+	rf.commitIndex = newIdx
+	rf.persist()
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -191,7 +220,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//rf is in old term, so turns to follower and take args.CandidateId as new leader
 	if args.Term > rf.currentTerm {
-		rf.switchToFollower(args.Term)
+		rf.switchToFollower(args.Term, -1)
 		//if the leader is not update-to-date than current raft instance, reject this
 		if !isPeerNotLessUpdateThanCurrentRaft(rf, args) {
 			reply.Term = rf.currentTerm
@@ -199,7 +228,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			return
 		}
 
-		rf.votedFor = args.CandidateId
+		//rf.votedFor = args.CandidateId 2C
+		rf.setVotedFor(args.CandidateId)
 		//rf.delay = rf.generateDelay()
 
 		reply.Term = rf.currentTerm
@@ -246,7 +276,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			//or deny this request
 			ret := isPeerNotLessUpdateThanCurrentRaft(rf, args)
 			if ret {
-				rf.votedFor = args.CandidateId
+				//rf.votedFor = args.CandidateId 2C
+				rf.setVotedFor(args.CandidateId)
 				reply.VoteGranted = true
 			}
 			return
@@ -290,8 +321,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.Term > rf.currentTerm {
-		rf.switchToFollower(args.Term)
-		rf.votedFor = args.LeaderId
+		rf.switchToFollower(args.Term, args.LeaderId)
+		//rf.votedFor = args.LeaderId 2C
+		//rf.setVotedFor(args.LeaderId) combined into new switchToFollower
 		//rf.delay = rf.generateDelay()
 
 		fillReply(reply, rf, args)
@@ -318,8 +350,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//it means that a leader has been elected
 	//so return to follower state and set leader to args.LeaderId
 	if rf.role == 1 {
-		rf.switchToFollower(args.Term)
-		rf.votedFor = args.LeaderId
+		rf.switchToFollower(args.Term, args.LeaderId)
+		//rf.votedFor = args.LeaderId 2C
 		//rf.delay = rf.generateDelay()
 
 		fillReply(reply, rf, args)
@@ -340,7 +372,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.votedFor != -1 && rf.votedFor != args.LeaderId {
 		DPrintf("[ERROR]follower of term: %v voted leader: %v but receive appRPC from %v", rf.currentTerm, rf.votedFor, args.LeaderId)
 	}
-	rf.votedFor = args.LeaderId
+	//rf.votedFor = args.LeaderId 2C
+	rf.setVotedFor(args.LeaderId)
 
 	fillReply(reply, rf, args)
 	if reply.Success == false {
@@ -717,10 +750,11 @@ func (rf *Raft) getDelayDiffFromNow() time.Duration {
 }
 
 //lock before use this function
-func (rf *Raft) switchToFollower(term int) {
+func (rf *Raft) switchToFollower(term int, newLeader int) {
 	rf.role = 0
-	rf.votedFor = -1
+	rf.votedFor = newLeader
 	rf.currentTerm = term
+	rf.persist()
 	rf.delay = rf.generateDelay()
 	rf.commitIndexChanged.Broadcast()
 	DPrintf("[ROLE] [change to follower]Raft %v change to follower", rf.me)
@@ -803,6 +837,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 			rf.currentTerm++
 			rf.votedFor = rf.me
+			rf.persist()
 			rf.delay = rf.generateDelay()
 			cacheMe := rf.me
 			cacheTerm := rf.currentTerm
@@ -838,7 +873,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					if ret && rsp.Term > req.Term {
 						rf.mu.Lock()
 						if rsp.Term > rf.currentTerm {
-							rf.switchToFollower(rsp.Term)
+							rf.switchToFollower(rsp.Term, -1)
 							DPrintf("rf.me:%v request for election: req:%v Switch Role to follower", rf.me, i)
 						}
 						rf.mu.Unlock()
@@ -970,7 +1005,7 @@ func sendAppendEntriesRPC(i int, rf *Raft, args AppendEntriesArgs) (bool, Append
 	ret := rf.sendAppendEntries(i, &args, appRsp)
 	rf.mu.Lock()
 	if ret && appRsp.Term > rf.currentTerm {
-		rf.switchToFollower(appRsp.Term)
+		rf.switchToFollower(appRsp.Term, -1)
 	}
 	rf.mu.Unlock()
 	return ret, *appRsp
