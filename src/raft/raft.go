@@ -63,10 +63,11 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	role               int //0:follower 1:candidate 2:leader
-	delay              time.Time
-	commitIndexChanged *sync.Cond //use this to issue append entry rpcs
-	applyCh            chan ApplyMsg
+	role                    int //0:follower 1:candidate 2:leader
+	delay                   time.Time
+	commitIndexChanged      *sync.Cond //use this to issue append entry rpcs
+	applyCh                 chan ApplyMsg
+	highestReplicatingIndex []int //highest index that this server is replicating to server[i], it's to reduce duplicate RPC
 }
 
 type Entry struct {
@@ -220,11 +221,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//it stays in follower state
 	//I think the RPC that make sense here should be in curTerm
 	//as the paper listed what should be done when encounter newer or older term in request
-	//so the delay should be reset
+	//
 	//take care of election restriction(5.4.1) vote if candidate is more up to date.
 	if rf.role == 0 {
-		//reset time out delay
-		rf.delay = rf.generateDelay()
+		//reset time out delay  NO
+		//rf.delay = rf.generateDelay()
 
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -539,11 +540,12 @@ func (rf *Raft) replicateLog(index int) {
 	rf.mu.Unlock()
 	accepted := make(chan int, 100)
 	abort := make(chan int, 100)
+	duplicate := make(chan int, 100)
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
-		go rf.replicateUpThroughThisLogRPC(i, request, accepted, index, abort)
+		go rf.replicateUpThroughThisLogRPC(i, request, accepted, index, abort, duplicate)
 	}
 
 	cnt := 1
@@ -555,6 +557,9 @@ func (rf *Raft) replicateLog(index int) {
 			updated = append(updated, idx)
 		case exit := <-abort:
 			DPrintf("one [%v]replicateUpThroughThisLogRPC return abort, so stop replicating entries up through %v[entry is not committed]", exit, index)
+			return
+		case d := <-duplicate:
+			DPrintf("one [%v]replicateUpThroughThisLogRPC return duplicate. entry %v is being replicating. quit current process.[entry is not committed]", d, index)
 			return
 		}
 	}
@@ -588,13 +593,17 @@ func (rf *Raft) replicateLog(index int) {
 			}
 			rf.mu.Unlock()
 		case exit := <-abort:
-			DPrintf("one [%v]replicateUpThroughThisLogRPC return abort, so stop replicating entries up through %v[entry is committed]", exit, index)
+			DPrintf("one [%v]replicateUpThroughThisLogRPC return [abort], so stop replicating entries up through %v[entry is committed]", exit, index)
+			return
+		case d := <-duplicate:
+			DPrintf("one [%v]replicateUpThroughThisLogRPC return [duplicate]. entry %v is being replicating. quit current process.[entry is committed]", d, index)
 			return
 		}
 	}
 }
 
-func (rf *Raft) replicateUpThroughThisLogRPC(i int, args AppendEntriesArgs, acc chan int, cmdIndex int, abort chan int) {
+func (rf *Raft) replicateUpThroughThisLogRPC(i int, args AppendEntriesArgs, acc chan int, cmdIndex int, abort chan int, dup chan int) {
+	updateReplictingIndex := false
 	for true {
 		//set entries to this args
 		rf.mu.Lock()
@@ -607,9 +616,19 @@ func (rf *Raft) replicateUpThroughThisLogRPC(i int, args AppendEntriesArgs, acc 
 		if cmdIndex < rf.nextIndex[i] {
 			DPrintf("rf:%v stop replicating with last entry:%v to %v. since nextIndex[i] : %v > cmdIndex:%v", rf.me, rf.log[cmdIndex-1], i, rf.nextIndex[i], cmdIndex)
 			rf.mu.Unlock()
-			acc <- 1
+			dup <- i
 			return
 		}
+
+		if (!updateReplictingIndex && cmdIndex <= rf.highestReplicatingIndex[i]) || (updateReplictingIndex && cmdIndex != rf.highestReplicatingIndex[i]) {
+			DPrintf("rf:%v stop replicating with last entry:%v to %v. since a higher index cmd[index:%v] > [cur:%v] is being replicating.", rf.me, rf.log[cmdIndex-1], i, rf.highestReplicatingIndex[i], cmdIndex)
+			rf.mu.Unlock()
+			dup <- i
+			return
+		}
+
+		updateReplictingIndex = true
+		rf.highestReplicatingIndex[i] = cmdIndex
 		next := rf.nextIndex[i]
 		args.Entries = rf.log[next-1:cmdIndex]
 		args.PrevLogIndex = next - 1
@@ -859,6 +878,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.nextIndex[index] = nextIndexInit
 				}
 				rf.matchIndex = make([]int, len(rf.peers))
+				rf.highestReplicatingIndex = make([]int, len(rf.peers))
 			}
 			rf.mu.Unlock()
 
@@ -892,7 +912,8 @@ func heartBeat(rf *Raft) {
 				request := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, LeaderCommit: rf.commitIndex}
 				acc := make(chan int, 1)
 				abort := make(chan int, 1)
-				go rf.replicateUpThroughThisLogRPC(i, request, acc, len(rf.log), abort)
+				dup := make(chan int, 1)
+				go rf.replicateUpThroughThisLogRPC(i, request, acc, len(rf.log), abort, dup)
 			}
 			rf.mu.Unlock()
 
