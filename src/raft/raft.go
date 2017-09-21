@@ -407,6 +407,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.log = append(rf.log, args.Entries[i])
 			}
 		}
+		rf.persist()
 	}
 	return
 }
@@ -537,6 +538,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		cmd := Entry{Term: rf.currentTerm, Command: command}
 		rf.log = append(rf.log, cmd)
+		rf.persist()
 		DPrintf("[REPLICATE] [Start] leader:%v replicate: command:%v", rf.me, cmd)
 		go rf.replicateLog(index)
 	}
