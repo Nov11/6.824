@@ -6,7 +6,7 @@ import "log"
 const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
+	if Debug > 1 {
 		log.Printf(format, a...)
 	}
 	return
